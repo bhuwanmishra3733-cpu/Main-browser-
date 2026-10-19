@@ -35,12 +35,16 @@ import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
-import android.widget.MediaController;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
-import android.widget.VideoView;
+
+import androidx.media3.common.MediaItem;
+import androidx.media3.common.PlaybackException;
+import androidx.media3.common.Player;
+import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.ui.PlayerView;
 
 import org.json.JSONObject;
 import org.json.JSONTokener;
@@ -79,6 +83,8 @@ public class MainActivity extends Activity {
     ProgressBar bar;
     TextView status;
     Button tabBtn;
+    Button cancelBtn;
+    volatile boolean cancelDl = false;
     final Handler ui = new Handler(Looper.getMainLooper());
 
     // ---------- small helpers ----------
@@ -120,6 +126,15 @@ public class MainActivity extends Activity {
         double mb = kb / 1024.0;
         if (mb < 1024) return String.format(Locale.US, "%.2f MB", mb);
         return String.format(Locale.US, "%.2f GB", mb / 1024.0);
+    }
+
+    String durText(long ms) {
+        long s = ms / 1000;
+        long h = s / 3600;
+        long m = (s % 3600) / 60;
+        long sec = s % 60;
+        if (h > 0) return String.format(Locale.US, "%d:%02d:%02d", h, m, sec);
+        return String.format(Locale.US, "%d:%02d", m, sec);
     }
 
     // ---------- crash reporter: shows the error on next launch ----------
@@ -197,7 +212,7 @@ public class MainActivity extends Activity {
         }));
         box.addView(row);
         setContentView(box);
-    }
+}
     // ---------- UI ----------
 
     @Override
@@ -245,12 +260,37 @@ public class MainActivity extends Activity {
         bar.setVisibility(View.GONE);
         bar.setLayoutParams(new LinearLayout.LayoutParams(MP, dp(3)));
 
-        status = new TextView(this);
+        cancelBtn = new Button(this);
+        cancelBtn.setText("Cancel");
+        cancelBtn.setAllCaps(false);
+        cancelBtn.setTextSize(12);
+        cancelBtn.setLayoutParams(new LinearLayout.LayoutParams(dp(90), dp(40)));
+        cancelBtn.setVisibility(View.GONE);
+        cancelBtn.setOnClickListener(v -> {
+            cancelDl = true;
+            status.setText("Cancelling...");
+        });
+
+        status = new TextView(this) {
+            @Override
+            public void setVisibility(int v) {
+                super.setVisibility(v);
+                if (cancelBtn != null) cancelBtn.setVisibility(v);
+            }
+        };
         status.setTextSize(12);
         status.setTextColor(Color.BLACK);
-        status.setBackgroundColor(Color.parseColor("#E8F0FE"));
         status.setPadding(dp(10), dp(4), dp(10), dp(4));
+        status.setGravity(Gravity.CENTER_VERTICAL);
+        status.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         status.setVisibility(View.GONE);
+
+        LinearLayout statusRow = new LinearLayout(this);
+        statusRow.setOrientation(LinearLayout.HORIZONTAL);
+        statusRow.setGravity(Gravity.CENTER_VERTICAL);
+        statusRow.setBackgroundColor(Color.parseColor("#E8F0FE"));
+        statusRow.addView(status);
+        statusRow.addView(cancelBtn);
 
         holder = new FrameLayout(this);
         holder.setLayoutParams(new LinearLayout.LayoutParams(MP, 0, 1f));
@@ -267,7 +307,7 @@ public class MainActivity extends Activity {
 
         root.addView(top);
         root.addView(bar);
-        root.addView(status);
+        root.addView(statusRow);
         root.addView(holder);
         root.addView(bottom);
         setContentView(root);
@@ -426,7 +466,7 @@ public class MainActivity extends Activity {
         } else {
             super.onBackPressed();
         }
-            }
+    }
     // ---------- download: find video, show info, save privately ----------
 
     void onDownloadClick() {
@@ -579,24 +619,29 @@ public class MainActivity extends Activity {
 
     void startDownload(final String url, final String ua, final String referer, final String name) {
         final File out = uniqueFile(privDir(), name);
+        cancelDl = false;
         status.setVisibility(View.VISIBLE);
         status.setText("Starting " + out.getName());
 
         new Thread(() -> {
             boolean ok = false;
             String err = null;
+            HttpURLConnection c = null;
+            InputStream in = null;
+            OutputStream os = null;
             try {
-                HttpURLConnection c = open(url, ua, referer);
+                c = open(url, ua, referer);
                 int code = c.getResponseCode();
                 if (code >= 400) throw new Exception("HTTP " + code);
                 long total = c.getContentLengthLong();
-                InputStream in = c.getInputStream();
-                OutputStream os = new FileOutputStream(out);
+                in = c.getInputStream();
+                os = new FileOutputStream(out);
                 byte[] buf = new byte[32768];
                 long done = 0;
                 long last = 0;
                 int n;
                 while ((n = in.read(buf)) != -1) {
+                    if (cancelDl) throw new Exception("Cancelled");
                     os.write(buf, 0, n);
                     done += n;
                     long now = System.currentTimeMillis();
@@ -613,6 +658,8 @@ public class MainActivity extends Activity {
                 c.disconnect();
                 ok = true;
             } catch (Exception e) {
+                try { if (os != null) os.close(); } catch (Exception ignored) { }
+                try { if (c != null) c.disconnect(); } catch (Exception ignored) { }
                 out.delete();
                 err = e.getMessage();
             }
@@ -621,14 +668,15 @@ public class MainActivity extends Activity {
             ui.post(() -> {
                 if (fok) {
                     status.setText("Saved privately: " + out.getName() + "  (" + fmt(out.length()) + ")");
+                    cancelBtn.setVisibility(View.GONE);
                     ui.postDelayed(() -> status.setVisibility(View.GONE), 5000);
                 } else {
                     status.setVisibility(View.GONE);
-                    toast("Download failed: " + fe);
+                    toast("Cancelled".equals(fe) ? "Download cancelled" : "Download failed: " + fe);
                 }
             });
         }).start();
-                     }
+            }
     // ---------- streams behind blob: URLs (HLS playlists and direct files) ----------
 
     final HashMap<WebView, ArrayList<String>> sniffed = new HashMap<>();
@@ -730,46 +778,97 @@ public class MainActivity extends Activity {
         return b.length() > 80 ? b.substring(0, 80) : b;
     }
 
+    // returns {duration in ms, number of segments, size of first segment in bytes or -1}
+    long[] hlsInfo(String url, String ua, String referer, boolean wantFirstSize) throws Exception {
+        String text = new String(fetchBytes(url, ua, referer), "UTF-8");
+        double dur = 0;
+        int count = 0;
+        String first = null;
+        Matcher m = Pattern.compile("#EXTINF:([0-9.]+)").matcher(text);
+        while (m.find()) dur += Double.parseDouble(m.group(1));
+        for (String raw : text.split("\\r?\\n")) {
+            String ln = raw.trim();
+            if (ln.isEmpty() || ln.startsWith("#")) continue;
+            count++;
+            if (first == null) first = resolve(url, ln);
+        }
+        long firstBytes = -1;
+        if (wantFirstSize && first != null) {
+            try {
+                HttpURLConnection c = open(first, ua, referer);
+                c.setRequestMethod("HEAD");
+                if (c.getResponseCode() < 400) firstBytes = c.getContentLengthLong();
+                c.disconnect();
+            } catch (Exception e) { }
+        }
+        return new long[]{(long) (dur * 1000), count, firstBytes};
+    }
+
+    void askHls(final String url, final String ua, final String referer, final String title,
+                final long durMs, final long estBytes) {
+        ui.post(() -> {
+            String msg = "Duration: " + (durMs > 0 ? durText(durMs) : "Unknown")
+                    + "\nSize: " + (estBytes > 0 ? "~" + fmt(estBytes) + " (estimate)" : "Unknown")
+                    + "\n\nSaved in app-private storage (not in Gallery).";
+            new AlertDialog.Builder(MainActivity.this)
+                    .setTitle("Download video")
+                    .setMessage(msg)
+                    .setPositiveButton("Download", (d, which) -> new Thread(() -> hlsRun(url, ua, referer, title)).start())
+                    .setNegativeButton("Cancel", null)
+                    .show();
+        });
+    }
+
     void hlsStart(final String url, final String ua, final String referer, final String title) {
         toast("Reading stream...");
         new Thread(() -> {
             try {
                 String text = new String(fetchBytes(url, ua, referer), "UTF-8");
                 if (!text.contains("#EXT-X-STREAM-INF")) {
-                    hlsRun(url, ua, referer, title);
+                    long[] info1 = hlsInfo(url, ua, referer, true);
+                    long est = (info1[2] > 0 && info1[1] > 0) ? info1[2] * info1[1] : -1;
+                    askHls(url, ua, referer, title, info1[0], est);
                     return;
                 }
                 final ArrayList<String[]> vars = new ArrayList<>(); // {label, url, bandwidth}
                 String[] lines = text.split("\\r?\\n");
-                for (int i = 0; i < lines.length; i++) {
+                for (int i = 0; i < lines.length && vars.size() < 10; i++) {
                     String ln = lines[i].trim();
                     if (!ln.startsWith("#EXT-X-STREAM-INF")) continue;
                     int j = i + 1;
                     while (j < lines.length && (lines[j].trim().isEmpty() || lines[j].trim().startsWith("#"))) j++;
                     if (j >= lines.length) continue;
                     long bw = 0;
+                    Matcher ma = Pattern.compile("[:,]AVERAGE-BANDWIDTH=(\\d+)").matcher(ln);
+                    Matcher mb = Pattern.compile("[:,]BANDWIDTH=(\\d+)").matcher(ln);
+                    if (ma.find()) bw = Long.parseLong(ma.group(1));
+                    else if (mb.find()) bw = Long.parseLong(mb.group(1));
                     String res = "";
-                    Matcher mb = Pattern.compile("BANDWIDTH=(\\d+)").matcher(ln);
-                    if (mb.find()) bw = Long.parseLong(mb.group(1));
                     Matcher mr = Pattern.compile("RESOLUTION=\\d+x(\\d+)").matcher(ln);
                     if (mr.find()) res = mr.group(1) + "p";
-                    String label = (res.isEmpty() ? "Quality" : res) + (bw > 0 ? "  (" + (bw / 1000) + " kbps)" : "");
-                    vars.add(new String[]{label, resolve(url, lines[j].trim()), String.valueOf(bw)});
+                    String vurl = resolve(url, lines[j].trim());
+                    String label = res.isEmpty() ? "Quality" : res;
+                    try {
+                        long[] info2 = hlsInfo(vurl, ua, referer, false);
+                        if (info2[0] > 0) {
+                            label += "  •  " + durText(info2[0]);
+                            if (bw > 0) label += "  •  ~" + fmt(bw / 8 * info2[0] / 1000);
+                        }
+                    } catch (Exception ignored) { }
+                    vars.add(new String[]{label, vurl, String.valueOf(bw)});
                 }
                 if (vars.isEmpty()) throw new Exception("no video variants found");
                 Collections.sort(vars, (a, b) -> Long.compare(Long.parseLong(b[2]), Long.parseLong(a[2])));
-                ui.post(() -> {
-                    String[] labels = new String[vars.size()];
-                    for (int i = 0; i < labels.length; i++) labels[i] = vars.get(i)[0];
-                    new AlertDialog.Builder(MainActivity.this)
-                            .setTitle("Choose quality")
-                            .setItems(labels, (d, which) -> {
-                                final String pick = vars.get(which)[1];
-                                new Thread(() -> hlsRun(pick, ua, referer, title)).start();
-                            })
-                            .setNegativeButton("Cancel", null)
-                            .show();
-                });
+                final String[] labels = new String[vars.size()];
+                for (int k = 0; k < labels.length; k++) labels[k] = vars.get(k)[0];
+                ui.post(() -> new AlertDialog.Builder(MainActivity.this)
+                        .setTitle("Choose quality (size is an estimate)")
+                        .setItems(labels, (d, which) -> {
+                            final String pick = vars.get(which)[1];
+                            new Thread(() -> hlsRun(pick, ua, referer, title)).start();
+                        })
+                        .setNegativeButton("Cancel", null)
+                        .show());
             } catch (final Exception e) {
                 ui.post(() -> toast("Could not read stream: " + e.getMessage()));
             }
@@ -778,9 +877,11 @@ public class MainActivity extends Activity {
 
     // Runs on a background thread: downloads every segment of a VOD playlist into one file.
     void hlsRun(String url, String ua, String referer, String title) {
+        cancelDl = false;
         File out = null;
         String err = null;
         boolean ok = false;
+        OutputStream os = null;
         try {
             String text = new String(fetchBytes(url, ua, referer), "UTF-8");
             if (!text.contains("#EXTINF")) throw new Exception("not a video playlist");
@@ -829,16 +930,18 @@ public class MainActivity extends Activity {
             });
 
             out = uniqueFile(privDir(), safeName(title) + (mapUri != null ? ".mp4" : ".ts"));
-            OutputStream os = new FileOutputStream(out);
+            os = new FileOutputStream(out);
             HashMap<String, byte[]> keyCache = new HashMap<>();
             if (mapUri != null) os.write(fetchBytes(mapUri, ua, referer));
 
             long written = 0;
             long last = 0;
             for (int i = 0; i < total; i++) {
+                if (cancelDl) throw new Exception("Cancelled");
                 byte[] data = null;
                 Exception lastErr = null;
                 for (int t = 0; t < 3 && data == null; t++) {
+                    if (cancelDl) throw new Exception("Cancelled");
                     try {
                         data = fetchBytes(segUrls.get(i), ua, referer);
                     } catch (Exception e) {
@@ -884,6 +987,7 @@ public class MainActivity extends Activity {
             os.close();
             ok = true;
         } catch (Exception e) {
+            try { if (os != null) os.close(); } catch (Exception ignored) { }
             err = e.getMessage();
             if (out != null) out.delete();
         }
@@ -893,13 +997,14 @@ public class MainActivity extends Activity {
         ui.post(() -> {
             if (fok) {
                 status.setText("Saved privately: " + fout.getName() + "  (" + fmt(fout.length()) + ")");
+                cancelBtn.setVisibility(View.GONE);
                 ui.postDelayed(() -> status.setVisibility(View.GONE), 5000);
             } else {
                 status.setVisibility(View.GONE);
-                toast("Download failed: " + fe);
+                toast("Cancelled".equals(fe) ? "Download cancelled" : "Download failed: " + fe);
             }
         });
-            }
+    }
     // ---------- private files ----------
 
     void showFiles() {
@@ -922,7 +1027,7 @@ public class MainActivity extends Activity {
     }
 
     void fileActions(final File f) {
-        String[] items = {"Open", "Export to Downloads", "Delete"};
+        String[] items = {"Play / Open", "Export to Downloads", "Delete"};
         new AlertDialog.Builder(this)
                 .setTitle(f.getName())
                 .setItems(items, (d, which) -> {
@@ -938,21 +1043,9 @@ public class MainActivity extends Activity {
 
     void openFile(File f) {
         String n = f.getName().toLowerCase(Locale.US);
-        if (n.endsWith(".mp4") || n.endsWith(".webm") || n.endsWith(".mkv") || n.endsWith(".3gp") || n.endsWith(".ts")) {
-            final Dialog dlg = new Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen);
-            FrameLayout fl = new FrameLayout(this);
-            fl.setBackgroundColor(Color.BLACK);
-            final VideoView vv = new VideoView(this);
-            vv.setLayoutParams(new FrameLayout.LayoutParams(MP, MP, Gravity.CENTER));
-            MediaController mc = new MediaController(this);
-            mc.setAnchorView(vv);
-            vv.setMediaController(mc);
-            vv.setVideoPath(f.getAbsolutePath());
-            fl.addView(vv);
-            dlg.setContentView(fl);
-            dlg.setOnDismissListener(x -> vv.stopPlayback());
-            dlg.show();
-            vv.start();
+        if (n.endsWith(".mp4") || n.endsWith(".webm") || n.endsWith(".mkv") || n.endsWith(".3gp")
+                || n.endsWith(".ts") || n.endsWith(".m4v")) {
+            playVideo(f);
         } else if (n.endsWith(".jpg") || n.endsWith(".jpeg") || n.endsWith(".png")
                 || n.endsWith(".gif") || n.endsWith(".webp")) {
             BitmapFactory.Options o = new BitmapFactory.Options();
@@ -970,6 +1063,48 @@ public class MainActivity extends Activity {
             dlg.show();
         } else {
             toast("No preview for this file type. Use Export to Downloads to open it elsewhere.");
+        }
+    }
+
+    // ---------- built-in video player (ExoPlayer) ----------
+
+    void playVideo(File f) {
+        try {
+            final Dialog dlg = new Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen);
+            final ExoPlayer player = new ExoPlayer.Builder(this).build();
+
+            PlayerView pv = new PlayerView(this);
+            pv.setLayoutParams(new FrameLayout.LayoutParams(MP, MP));
+            pv.setPlayer(player);
+
+            FrameLayout fl = new FrameLayout(this);
+            fl.setBackgroundColor(Color.BLACK);
+            fl.addView(pv);
+
+            Button close = new Button(this);
+            close.setText("Close");
+            close.setAllCaps(false);
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(80), dp(44), Gravity.TOP | Gravity.END);
+            lp.setMargins(dp(8), dp(24), dp(8), 0);
+            close.setLayoutParams(lp);
+            close.setOnClickListener(v -> dlg.dismiss());
+            fl.addView(close);
+
+            player.addListener(new Player.Listener() {
+                @Override
+                public void onPlayerError(PlaybackException error) {
+                    toast("Cannot play this video: " + error.getMessage());
+                }
+            });
+
+            dlg.setContentView(fl);
+            dlg.setOnDismissListener(x -> player.release());
+            player.setMediaItem(MediaItem.fromUri(Uri.fromFile(f)));
+            player.prepare();
+            player.play();
+            dlg.show();
+        } catch (Exception e) {
+            toast("Cannot play: " + e.getMessage());
         }
     }
 
@@ -1000,4 +1135,4 @@ public class MainActivity extends Activity {
             ui.post(() -> toast(fr));
         }).start();
     }
-                    }
+                }
