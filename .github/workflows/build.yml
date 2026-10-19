@@ -57,7 +57,7 @@ jobs:
 
           cat > gradle.properties <<'EOF'
           org.gradle.jvmargs=-Xmx2g
-          android.useAndroidX=false
+          android.useAndroidX=true
           EOF
 
           cat > app/build.gradle <<'EOF'
@@ -79,8 +79,11 @@ jobs:
                   targetCompatibility JavaVersion.VERSION_17
               }
           }
+          dependencies {
+              implementation 'androidx.media3:media3-exoplayer:1.3.1'
+              implementation 'androidx.media3:media3-ui:1.3.1'
+          }
           EOF
-
           cat > app/src/main/AndroidManifest.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
@@ -121,4 +124,3 @@ jobs:
           name: Browser-by-Bhuvan-APK
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-          
