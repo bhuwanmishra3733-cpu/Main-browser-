@@ -26,10 +26,11 @@ jobs:
       - name: Accept Android licenses
         run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null || true
 
-      - name: Create project files
-        run: |
-          mkdir -p app/src/main/java/com/bhuvan/browser
+      - name: Check Java file exists
+        run: test -f app/src/main/java/com/bhuvan/browser/MainActivity.java
 
+      - name: Create gradle and manifest files
+        run: |
           cat > settings.gradle <<'EOF'
           pluginManagement {
               repositories {
@@ -63,11 +64,9 @@ jobs:
           plugins {
               id 'com.android.application'
           }
-
           android {
               namespace 'com.bhuvan.browser'
               compileSdk 34
-
               defaultConfig {
                   applicationId "com.bhuvan.browser"
                   minSdk 24
@@ -75,7 +74,6 @@ jobs:
                   versionCode 2
                   versionName "2.0"
               }
-
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
                   targetCompatibility JavaVersion.VERSION_17
@@ -86,16 +84,13 @@ jobs:
           cat > app/src/main/AndroidManifest.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-
               <uses-permission android:name="android.permission.INTERNET" />
               <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-
               <application
                   android:label="Browser by Bhuvan"
                   android:usesCleartextTraffic="true"
                   android:allowBackup="false"
                   android:theme="@android:style/Theme.Material.Light.NoActionBar">
-
                   <activity
                       android:name=".MainActivity"
                       android:exported="true"
@@ -117,372 +112,13 @@ jobs:
           </manifest>
           EOF
 
-          cat > app/src/main/java/com/bhuvan/browser/MainActivity.java <<'EOF'
-          package com.bhuvan.browser;
+      - name: Build debug APK
+        run: gradle assembleDebug --stacktrace
 
-          import android.app.Activity;
-          import android.app.AlertDialog;
-          import android.app.Dialog;
-          import android.content.ContentValues;
-          import android.content.Intent;
-          import android.graphics.Bitmap;
-          import android.graphics.BitmapFactory;
-          import android.graphics.Color;
-          import android.net.Uri;
-          import android.os.Build;
-          import android.os.Bundle;
-          import android.os.Environment;
-          import android.os.Handler;
-          import android.os.Looper;
-          import android.provider.MediaStore;
-          import android.text.InputType;
-          import android.view.Gravity;
-          import android.view.View;
-          import android.view.inputmethod.EditorInfo;
-          import android.view.inputmethod.InputMethodManager;
-          import android.webkit.CookieManager;
-          import android.webkit.URLUtil;
-          import android.webkit.WebChromeClient;
-          import android.webkit.WebResourceRequest;
-          import android.webkit.WebSettings;
-          import android.webkit.WebView;
-          import android.webkit.WebViewClient;
-          import android.widget.Button;
-          import android.widget.EditText;
-          import android.widget.FrameLayout;
-          import android.widget.ImageView;
-          import android.widget.LinearLayout;
-          import android.widget.MediaController;
-          import android.widget.ProgressBar;
-          import android.widget.TextView;
-          import android.widget.Toast;
-          import android.widget.VideoView;
-
-          import org.json.JSONObject;
-          import org.json.JSONTokener;
-
-          import java.io.File;
-          import java.io.FileInputStream;
-          import java.io.FileOutputStream;
-          import java.io.InputStream;
-          import java.io.OutputStream;
-          import java.net.HttpURLConnection;
-          import java.net.URL;
-          import java.util.ArrayList;
-          import java.util.Arrays;
-          import java.util.Locale;
-          import java.util.regex.Matcher;
-          import java.util.regex.Pattern;
-
-          public class MainActivity extends Activity {
-
-              static final String HOME = "https://www.google.com";
-              static final int MP = -1;
-
-              final ArrayList<WebView> tabs = new ArrayList<>();
-              int cur = -1;
-              FrameLayout holder;
-              EditText urlBox;
-              ProgressBar bar;
-              TextView status;
-              Button tabBtn;
-              final Handler ui = new Handler(Looper.getMainLooper());
-
-              // ---------- small helpers ----------
-
-              int dp(int v) {
-                  return (int) (v * getResources().getDisplayMetrics().density);
-              }
-
-              Button btn(String text, View.OnClickListener l) {
-                  Button b = new Button(this);
-                  b.setText(text);
-                  b.setAllCaps(false);
-                  b.setTextSize(12);
-                  b.setPadding(0, 0, 0, 0);
-                  b.setOnClickListener(l);
-                  b.setLayoutParams(new LinearLayout.LayoutParams(0, dp(48), 1f));
-                  return b;
-              }
-
-              WebView cw() {
-                  return (cur >= 0 && cur < tabs.size()) ? tabs.get(cur) : null;
-              }
-
-              void toast(String m) {
-                  Toast.makeText(this, m, Toast.LENGTH_LONG).show();
-              }
-
-              File privDir() {
-                  File d = new File(getFilesDir(), "private");
-                  d.mkdirs();
-                  return d;
-              }
-
-              String fmt(long b) {
-                  if (b < 0) return "Unknown";
-                  if (b < 1024) return b + " B";
-                  double kb = b / 1024.0;
-                  if (kb < 1024) return String.format(Locale.US, "%.1f KB", kb);
-                  double mb = kb / 1024.0;
-                  if (mb < 1024) return String.format(Locale.US, "%.2f MB", mb);
-                  return String.format(Locale.US, "%.2f GB", mb / 1024.0);
-              }
-
-              // ---------- UI ----------
-
-              @Override
-              protected void onCreate(Bundle b0) {
-                  super.onCreate(b0);
-
-                  LinearLayout root = new LinearLayout(this);
-                  root.setOrientation(LinearLayout.VERTICAL);
-                  root.setBackgroundColor(Color.WHITE);
-
-                  LinearLayout top = new LinearLayout(this);
-                  top.setOrientation(LinearLayout.HORIZONTAL);
-                  top.setPadding(dp(8), dp(8), dp(8), dp(4));
-
-                  urlBox = new EditText(this);
-                  urlBox.setSingleLine(true);
-                  urlBox.setHint("Search or type URL");
-                  urlBox.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-                  urlBox.setImeOptions(EditorInfo.IME_ACTION_GO);
-                  urlBox.setSelectAllOnFocus(true);
-                  urlBox.setLayoutParams(new LinearLayout.LayoutParams(0, dp(48), 1f));
-                  urlBox.setOnEditorActionListener((v, actionId, event) -> {
-                      loadInput(urlBox.getText().toString());
-                      return true;
-                  });
-
-                  Button go = new Button(this);
-                  go.setText("Go");
-                  go.setAllCaps(false);
-                  go.setLayoutParams(new LinearLayout.LayoutParams(dp(64), dp(48)));
-                  go.setOnClickListener(v -> loadInput(urlBox.getText().toString()));
-
-                  top.addView(urlBox);
-                  top.addView(go);
-
-                  bar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-                  bar.setMax(100);
-                  bar.setVisibility(View.GONE);
-                  bar.setLayoutParams(new LinearLayout.LayoutParams(MP, dp(3)));
-
-                  status = new TextView(this);
-                  status.setTextSize(12);
-                  status.setTextColor(Color.BLACK);
-                  status.setBackgroundColor(Color.parseColor("#E8F0FE"));
-                  status.setPadding(dp(10), dp(4), dp(10), dp(4));
-                  status.setVisibility(View.GONE);
-
-                  holder = new FrameLayout(this);
-                  holder.setLayoutParams(new LinearLayout.LayoutParams(MP, 0, 1f));
-
-                  LinearLayout bottom = new LinearLayout(this);
-                  bottom.setOrientation(LinearLayout.HORIZONTAL);
-                  bottom.setPadding(dp(4), dp(2), dp(4), dp(2));
-                  bottom.addView(btn("Back", v -> { WebView w = cw(); if (w != null && w.canGoBack()) w.goBack(); }));
-                  bottom.addView(btn("Fwd", v -> { WebView w = cw(); if (w != null && w.canGoForward()) w.goForward(); }));
-                  bottom.addView(btn("Download", v -> onDownloadClick()));
-                  tabBtn = btn("Tabs 1", v -> showTabs());
-                  bottom.addView(tabBtn);
-                  bottom.addView(btn("More", v -> showMore()));
-
-                  root.addView(top);
-                  root.addView(bar);
-                  root.addView(status);
-                  root.addView(holder);
-                  root.addView(bottom);
-                  setContentView(root);
-
-                  CookieManager.getInstance().setAcceptCookie(true);
-
-                  Uri incoming = getIntent() != null ? getIntent().getData() : null;
-                  createTab(incoming != null ? incoming.toString() : HOME);
-              }
-
-              // ---------- tabs ----------
-
-              void createTab(String url) {
-                  final WebView w = new WebView(this);
-                  w.setLayoutParams(new FrameLayout.LayoutParams(MP, MP));
-
-                  WebSettings s = w.getSettings();
-                  s.setJavaScriptEnabled(true);
-                  s.setDomStorageEnabled(true);
-                  s.setLoadWithOverviewMode(true);
-                  s.setUseWideViewPort(true);
-                  s.setBuiltInZoomControls(true);
-                  s.setDisplayZoomControls(false);
-                  s.setSupportZoom(true);
-                  s.setMediaPlaybackRequiresUserGesture(false);
-                  CookieManager.getInstance().setAcceptThirdPartyCookies(w, true);
-
-                  w.setWebViewClient(new WebViewClient() {
-                      @Override
-                      public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                          String u = request.getUrl().toString();
-                          if (u.startsWith("http://") || u.startsWith("https://")) {
-                              return false;
-                          }
-                          try {
-                              startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(u)));
-                          } catch (Exception e) {
-                              toast("Cannot open link");
-                          }
-                          return true;
-                      }
-
-                      @Override
-                      public void onPageStarted(WebView view, String u, Bitmap favicon) {
-                          if (view == cw()) urlBox.setText(u);
-                      }
-                  });
-
-                  w.setWebChromeClient(new WebChromeClient() {
-                      @Override
-                      public void onProgressChanged(WebView view, int p) {
-                          if (view == cw()) {
-                              bar.setProgress(p);
-                              bar.setVisibility(p < 100 ? View.VISIBLE : View.GONE);
-                          }
-                      }
-                  });
-
-                  w.setDownloadListener((u, ua, cd, mime, len) -> showInfo(u, ua, cd, mime, len, null, 0));
-
-                  tabs.add(w);
-                  switchTab(tabs.size() - 1);
-                  w.loadUrl(url);
-              }
-
-              void switchTab(int i) {
-                  if (i < 0 || i >= tabs.size()) return;
-                  cur = i;
-                  holder.removeAllViews();
-                  holder.addView(tabs.get(i));
-                  String u = tabs.get(i).getUrl();
-                  urlBox.setText(u == null ? "" : u);
-                  bar.setVisibility(View.GONE);
-                  tabBtn.setText("Tabs " + tabs.size());
-              }
-
-              void closeTab(int i) {
-                  if (i < 0 || i >= tabs.size()) return;
-                  WebView old = tabs.remove(i);
-                  holder.removeAllViews();
-                  old.destroy();
-                  if (tabs.isEmpty()) {
-                      cur = -1;
-                      createTab(HOME);
-                  } else {
-                      switchTab(Math.min(i, tabs.size() - 1));
-                  }
-              }
-
-              void showTabs() {
-                  String[] t = new String[tabs.size()];
-                  for (int i = 0; i < t.length; i++) {
-                      String title = tabs.get(i).getTitle();
-                      if (title == null || title.isEmpty()) title = tabs.get(i).getUrl();
-                      if (title == null || title.isEmpty()) title = "New tab";
-                      t[i] = (i + 1) + ". " + (i == cur ? "(current) " : "") + title;
-                  }
-                  new AlertDialog.Builder(this)
-                          .setTitle("Tabs (" + tabs.size() + ")")
-                          .setItems(t, (d, which) -> switchTab(which))
-                          .setPositiveButton("New tab", (d, which) -> createTab(HOME))
-                          .setNeutralButton("Close this tab", (d, which) -> closeTab(cur))
-                          .setNegativeButton("Cancel", null)
-                          .show();
-              }
-
-              void showMore() {
-                  String[] items = {"New tab", "Home", "Reload", "Private files", "Close this tab"};
-                  new AlertDialog.Builder(this)
-                          .setItems(items, (d, which) -> {
-                              WebView w = cw();
-                              switch (which) {
-                                  case 0: createTab(HOME); break;
-                                  case 1: if (w != null) w.loadUrl(HOME); break;
-                                  case 2: if (w != null) w.reload(); break;
-                                  case 3: showFiles(); break;
-                                  case 4: closeTab(cur); break;
-                              }
-                          })
-                          .show();
-              }
-
-              void loadInput(String input) {
-                  String in = input.trim();
-                  if (in.isEmpty()) return;
-                  String u;
-                  if (in.startsWith("http://") || in.startsWith("https://")) {
-                      u = in;
-                  } else if (in.contains(".") && !in.contains(" ")) {
-                      u = "https://" + in;
-                  } else {
-                      u = "https://www.google.com/search?q=" + Uri.encode(in);
-                  }
-                  WebView w = cw();
-                  if (w == null) return;
-                  w.loadUrl(u);
-                  w.requestFocus();
-                  InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
-                  if (imm != null) imm.hideSoftInputFromWindow(urlBox.getWindowToken(), 0);
-              }
-
-              @Override
-              public void onBackPressed() {
-                  WebView w = cw();
-                  if (w != null && w.canGoBack()) {
-                      w.goBack();
-                  } else if (tabs.size() > 1) {
-                      closeTab(cur);
-                  } else {
-                      super.onBackPressed();
-                  }
-              }
-
-              // ---------- download: find video, show info, save privately ----------
-
-              void onDownloadClick() {
-                  final WebView w = cw();
-                  if (w == null) return;
-                  String js = "(function(){var v=document.querySelector('video');if(!v)return '';"
-                          + "var s=v.currentSrc||v.src||'';"
-                          + "if(!s){var so=v.querySelector('source');if(so)s=so.src;}"
-                          + "return JSON.stringify({src:s,title:document.title,w:v.videoWidth||0,h:v.videoHeight||0});})()";
-                  w.evaluateJavascript(js, val -> {
-                      String src = "";
-                      String title = null;
-                      int h = 0;
-                      try {
-                          Object o = new JSONTokener(val).nextValue();
-                          if (o instanceof String && ((String) o).length() > 0) {
-                              JSONObject j = new JSONObject((String) o);
-                              src = j.optString("src", "");
-                              title = j.optString("title", null);
-                              h = j.optInt("h", 0);
-                          }
-                      } catch (Exception e) { }
-
-                      if (src.startsWith("blob:")) {
-                          toast("This site streams the video in pieces, so it cannot be downloaded directly.");
-                          return;
-                      }
-                      if (src.startsWith("http")) {
-                          showInfo(src, w.getSettings().getUserAgentString(), null, null, -1, title, h);
-                          return;
-                      }
-                      toast("No video found on this page. Play the video first, then tap Download. File links download automatically when tapped.");
-                  });
-              }
-
-              HttpURLConnection open(String url, String ua, String referer) throws Exception {
-                  HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
-                  c.setConnectTimeout(15000);
-                  c.setReadTimeout(20000);
-                  c.setInstanceFollowRedirects(true);
-                  if (ua != null) c.setRequest
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Browser-by-Bhuvan-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          
