@@ -2,7 +2,7 @@ name: Build Browser APK
 
 on:
   push:
-    branches: [ main, master ]
+  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -485,4 +485,4 @@ jobs:
                   c.setConnectTimeout(15000);
                   c.setReadTimeout(20000);
                   c.setInstanceFollowRedirects(true);
-                  if (ua != nul
+                  if (ua != null) c.setRequest
