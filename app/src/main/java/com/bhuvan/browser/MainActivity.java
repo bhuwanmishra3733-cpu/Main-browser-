@@ -26,6 +26,7 @@ import android.webkit.CookieManager;
 import android.webkit.URLUtil;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -44,6 +45,7 @@ import android.widget.VideoView;
 import org.json.JSONObject;
 import org.json.JSONTokener;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -55,9 +57,15 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import javax.crypto.Cipher;
+import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
 
 public class MainActivity extends Activity {
 
@@ -112,8 +120,9 @@ public class MainActivity extends Activity {
         double mb = kb / 1024.0;
         if (mb < 1024) return String.format(Locale.US, "%.2f MB", mb);
         return String.format(Locale.US, "%.2f GB", mb / 1024.0);
-  }
-  // ---------- crash reporter: shows the error on next launch ----------
+    }
+
+    // ---------- crash reporter: shows the error on next launch ----------
 
     File crashFile() {
         return new File(getFilesDir(), "crash.txt");
@@ -188,8 +197,8 @@ public class MainActivity extends Activity {
         }));
         box.addView(row);
         setContentView(box);
-          }
-  // ---------- UI ----------
+    }
+    // ---------- UI ----------
 
     @Override
     protected void onCreate(Bundle b0) {
@@ -267,8 +276,9 @@ public class MainActivity extends Activity {
 
         Uri incoming = getIntent() != null ? getIntent().getData() : null;
         createTab(incoming != null ? incoming.toString() : HOME);
-                               }
-  // ---------- tabs ----------
+    }
+
+    // ---------- tabs ----------
 
     void createTab(String url) {
         final WebView w = new WebView(this);
@@ -301,7 +311,14 @@ public class MainActivity extends Activity {
             }
 
             @Override
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                try { sniff(view, request.getUrl().toString()); } catch (Exception e) { }
+                return null;
+            }
+
+            @Override
             public void onPageStarted(WebView view, String u, Bitmap favicon) {
+                synchronized (sniffed) { sniffed.remove(view); }
                 if (view == cw()) urlBox.setText(u);
             }
         });
@@ -378,8 +395,9 @@ public class MainActivity extends Activity {
                     }
                 })
                 .show();
-        }
-  void loadInput(String input) {
+    }
+
+    void loadInput(String input) {
         String in = input.trim();
         if (in.isEmpty()) return;
         String u;
@@ -408,8 +426,7 @@ public class MainActivity extends Activity {
         } else {
             super.onBackPressed();
         }
-    }
-
+            }
     // ---------- download: find video, show info, save privately ----------
 
     void onDownloadClick() {
@@ -433,15 +450,20 @@ public class MainActivity extends Activity {
                 }
             } catch (Exception e) { }
 
-            if (src.startsWith("blob:")) {
-                toast("This site streams the video in pieces, so it cannot be downloaded directly.");
-                return;
-            }
             if (src.startsWith("http")) {
                 showInfo(src, w.getSettings().getUserAgentString(), null, null, -1, title, h);
                 return;
             }
-            toast("No video found on this page. Play the video first, then tap Download. File links download automatically when tapped.");
+            ArrayList<String> found = sniffedFor(w);
+            if (!found.isEmpty()) {
+                chooseStream(w, found, title, h);
+                return;
+            }
+            if (src.startsWith("blob:")) {
+                toast("Stream not detected yet. Play the video for a few seconds, then tap Download again.");
+            } else {
+                toast("No video found on this page. Play the video first, then tap Download. File links download automatically when tapped.");
+            }
         });
     }
 
@@ -455,8 +477,9 @@ public class MainActivity extends Activity {
         String ck = CookieManager.getInstance().getCookie(url);
         if (ck != null) c.setRequestProperty("Cookie", ck);
         return c;
-          }
-  void showInfo(final String url, final String ua, final String cd, final String mime,
+    }
+
+    void showInfo(final String url, final String ua, final String cd, final String mime,
                   final long len, final String title, final int h) {
         toast("Checking file...");
         final WebView cw = cw();
@@ -552,8 +575,9 @@ public class MainActivity extends Activity {
             f = new File(dir, base + " (" + (i++) + ")" + ext);
         }
         return f;
-  }
- void startDownload(final String url, final String ua, final String referer, final String name) {
+    }
+
+    void startDownload(final String url, final String ua, final String referer, final String name) {
         final File out = uniqueFile(privDir(), name);
         status.setVisibility(View.VISIBLE);
         status.setText("Starting " + out.getName());
@@ -604,8 +628,278 @@ public class MainActivity extends Activity {
                 }
             });
         }).start();
+                     }
+    // ---------- streams behind blob: URLs (HLS playlists and direct files) ----------
+
+    final HashMap<WebView, ArrayList<String>> sniffed = new HashMap<>();
+
+    void sniff(WebView v, String url) {
+        String p = url;
+        int q = p.indexOf('?');
+        if (q >= 0) p = p.substring(0, q);
+        p = p.toLowerCase(Locale.US);
+        if (!(p.endsWith(".m3u8") || p.endsWith(".mp4") || p.endsWith(".webm") || p.endsWith(".m4v"))) return;
+        synchronized (sniffed) {
+            ArrayList<String> l = sniffed.get(v);
+            if (l == null) {
+                l = new ArrayList<>();
+                sniffed.put(v, l);
+            }
+            l.remove(url);
+            l.add(url);
+            while (l.size() > 20) l.remove(0);
+        }
     }
 
+    ArrayList<String> sniffedFor(WebView v) {
+        ArrayList<String> out = new ArrayList<>();
+        synchronized (sniffed) {
+            ArrayList<String> l = sniffed.get(v);
+            if (l != null) {
+                for (int i = l.size() - 1; i >= 0; i--) out.add(l.get(i)); // newest first
+            }
+        }
+        return out;
+    }
+
+    void chooseStream(final WebView w, final ArrayList<String> items, final String title, final int h) {
+        if (items.size() == 1) {
+            openStream(items.get(0), w, title, h);
+            return;
+        }
+        String[] labels = new String[items.size()];
+        for (int i = 0; i < items.size(); i++) {
+            String u = items.get(i);
+            String path = u.split("\\?")[0];
+            String last = path.substring(path.lastIndexOf('/') + 1);
+            String kind = path.toLowerCase(Locale.US).endsWith(".m3u8") ? "Stream" : "File";
+            labels[i] = kind + ": " + last;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Videos found on this page")
+                .setItems(labels, (d, which) -> openStream(items.get(which), w, title, h))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    void openStream(String url, WebView w, String title, int h) {
+        String ua = w.getSettings().getUserAgentString();
+        String referer = w.getUrl();
+        String path = url.split("\\?")[0].toLowerCase(Locale.US);
+        if (path.endsWith(".m3u8")) {
+            hlsStart(url, ua, referer, title);
+        } else {
+            showInfo(url, ua, null, null, -1, title, h);
+        }
+    }
+
+    byte[] fetchBytes(String url, String ua, String referer) throws Exception {
+        HttpURLConnection c = open(url, ua, referer);
+        try {
+            int code = c.getResponseCode();
+            if (code >= 400) throw new Exception("HTTP " + code);
+            InputStream in = c.getInputStream();
+            ByteArrayOutputStream bo = new ByteArrayOutputStream();
+            byte[] buf = new byte[32768];
+            int n;
+            while ((n = in.read(buf)) != -1) bo.write(buf, 0, n);
+            in.close();
+            return bo.toByteArray();
+        } finally {
+            c.disconnect();
+        }
+    }
+
+    String resolve(String base, String ref) {
+        try {
+            return new URL(new URL(base), ref).toString();
+        } catch (Exception e) {
+            return ref;
+        }
+    }
+
+    String attr(String line, String key) {
+        Matcher m = Pattern.compile("[:,]" + key + "=(\"([^\"]*)\"|[^,]*)").matcher(line);
+        if (!m.find()) return null;
+        return m.group(2) != null ? m.group(2) : m.group(1);
+    }
+
+    String safeName(String title) {
+        if (title == null || title.trim().isEmpty()) return "video";
+        String b = title.trim().replaceAll("[\\\\/:*?\"<>|\\n\\r]", "_");
+        return b.length() > 80 ? b.substring(0, 80) : b;
+    }
+
+    void hlsStart(final String url, final String ua, final String referer, final String title) {
+        toast("Reading stream...");
+        new Thread(() -> {
+            try {
+                String text = new String(fetchBytes(url, ua, referer), "UTF-8");
+                if (!text.contains("#EXT-X-STREAM-INF")) {
+                    hlsRun(url, ua, referer, title);
+                    return;
+                }
+                final ArrayList<String[]> vars = new ArrayList<>(); // {label, url, bandwidth}
+                String[] lines = text.split("\\r?\\n");
+                for (int i = 0; i < lines.length; i++) {
+                    String ln = lines[i].trim();
+                    if (!ln.startsWith("#EXT-X-STREAM-INF")) continue;
+                    int j = i + 1;
+                    while (j < lines.length && (lines[j].trim().isEmpty() || lines[j].trim().startsWith("#"))) j++;
+                    if (j >= lines.length) continue;
+                    long bw = 0;
+                    String res = "";
+                    Matcher mb = Pattern.compile("BANDWIDTH=(\\d+)").matcher(ln);
+                    if (mb.find()) bw = Long.parseLong(mb.group(1));
+                    Matcher mr = Pattern.compile("RESOLUTION=\\d+x(\\d+)").matcher(ln);
+                    if (mr.find()) res = mr.group(1) + "p";
+                    String label = (res.isEmpty() ? "Quality" : res) + (bw > 0 ? "  (" + (bw / 1000) + " kbps)" : "");
+                    vars.add(new String[]{label, resolve(url, lines[j].trim()), String.valueOf(bw)});
+                }
+                if (vars.isEmpty()) throw new Exception("no video variants found");
+                Collections.sort(vars, (a, b) -> Long.compare(Long.parseLong(b[2]), Long.parseLong(a[2])));
+                ui.post(() -> {
+                    String[] labels = new String[vars.size()];
+                    for (int i = 0; i < labels.length; i++) labels[i] = vars.get(i)[0];
+                    new AlertDialog.Builder(MainActivity.this)
+                            .setTitle("Choose quality")
+                            .setItems(labels, (d, which) -> {
+                                final String pick = vars.get(which)[1];
+                                new Thread(() -> hlsRun(pick, ua, referer, title)).start();
+                            })
+                            .setNegativeButton("Cancel", null)
+                            .show();
+                });
+            } catch (final Exception e) {
+                ui.post(() -> toast("Could not read stream: " + e.getMessage()));
+            }
+        }).start();
+    }
+
+    // Runs on a background thread: downloads every segment of a VOD playlist into one file.
+    void hlsRun(String url, String ua, String referer, String title) {
+        File out = null;
+        String err = null;
+        boolean ok = false;
+        try {
+            String text = new String(fetchBytes(url, ua, referer), "UTF-8");
+            if (!text.contains("#EXTINF")) throw new Exception("not a video playlist");
+            if (!text.contains("#EXT-X-ENDLIST")) throw new Exception("live streams are not supported");
+
+            ArrayList<String> segUrls = new ArrayList<>();
+            ArrayList<String> segKeys = new ArrayList<>();
+            ArrayList<String> segIvs = new ArrayList<>();
+            ArrayList<Long> segSeqs = new ArrayList<>();
+            String mapUri = null;
+            String curKey = null;
+            String curIv = null;
+            long seq = 0;
+            Matcher ms = Pattern.compile("#EXT-X-MEDIA-SEQUENCE:(\\d+)").matcher(text);
+            if (ms.find()) seq = Long.parseLong(ms.group(1));
+
+            for (String raw : text.split("\\r?\\n")) {
+                String ln = raw.trim();
+                if (ln.isEmpty()) continue;
+                if (ln.startsWith("#EXT-X-KEY")) {
+                    String m = attr(ln, "METHOD");
+                    if ("NONE".equals(m)) {
+                        curKey = null;
+                        curIv = null;
+                    } else if ("AES-128".equals(m)) {
+                        curKey = resolve(url, attr(ln, "URI"));
+                        curIv = attr(ln, "IV");
+                    } else {
+                        throw new Exception("this video is protected (" + m + ") and cannot be saved");
+                    }
+                } else if (ln.startsWith("#EXT-X-MAP")) {
+                    mapUri = resolve(url, attr(ln, "URI"));
+                } else if (!ln.startsWith("#")) {
+                    segUrls.add(resolve(url, ln));
+                    segKeys.add(curKey);
+                    segIvs.add(curIv);
+                    segSeqs.add(seq++);
+                }
+            }
+            if (segUrls.isEmpty()) throw new Exception("no segments found");
+
+            final int total = segUrls.size();
+            ui.post(() -> {
+                status.setVisibility(View.VISIBLE);
+                status.setText("Starting stream download...");
+            });
+
+            out = uniqueFile(privDir(), safeName(title) + (mapUri != null ? ".mp4" : ".ts"));
+            OutputStream os = new FileOutputStream(out);
+            HashMap<String, byte[]> keyCache = new HashMap<>();
+            if (mapUri != null) os.write(fetchBytes(mapUri, ua, referer));
+
+            long written = 0;
+            long last = 0;
+            for (int i = 0; i < total; i++) {
+                byte[] data = null;
+                Exception lastErr = null;
+                for (int t = 0; t < 3 && data == null; t++) {
+                    try {
+                        data = fetchBytes(segUrls.get(i), ua, referer);
+                    } catch (Exception e) {
+                        lastErr = e;
+                    }
+                }
+                if (data == null) throw new Exception("segment " + (i + 1) + " failed: " + (lastErr != null ? lastErr.getMessage() : ""));
+
+                String keyUri = segKeys.get(i);
+                if (keyUri != null) {
+                    byte[] key = keyCache.get(keyUri);
+                    if (key == null) {
+                        key = fetchBytes(keyUri, ua, referer);
+                        keyCache.put(keyUri, key);
+                    }
+                    byte[] iv = new byte[16];
+                    String ivHex = segIvs.get(i);
+                    if (ivHex != null) {
+                        String hx = (ivHex.startsWith("0x") || ivHex.startsWith("0X")) ? ivHex.substring(2) : ivHex;
+                        while (hx.length() < 32) hx = "0" + hx;
+                        for (int j = 0; j < 16; j++) iv[j] = (byte) Integer.parseInt(hx.substring(2 * j, 2 * j + 2), 16);
+                    } else {
+                        long sq = segSeqs.get(i);
+                        for (int j = 15; j >= 8; j--) {
+                            iv[j] = (byte) (sq & 0xff);
+                            sq >>= 8;
+                        }
+                    }
+                    Cipher c = Cipher.getInstance("AES/CBC/PKCS5Padding");
+                    c.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(iv));
+                    data = c.doFinal(data);
+                }
+                os.write(data);
+                written += data.length;
+
+                long now = System.currentTimeMillis();
+                if (now - last > 400) {
+                    last = now;
+                    final String msg = "Downloading " + (i + 1) + " / " + total + " parts  " + ((i + 1) * 100 / total) + "%  " + fmt(written);
+                    ui.post(() -> status.setText(msg));
+                }
+            }
+            os.close();
+            ok = true;
+        } catch (Exception e) {
+            err = e.getMessage();
+            if (out != null) out.delete();
+        }
+        final boolean fok = ok;
+        final String fe = err;
+        final File fout = out;
+        ui.post(() -> {
+            if (fok) {
+                status.setText("Saved privately: " + fout.getName() + "  (" + fmt(fout.length()) + ")");
+                ui.postDelayed(() -> status.setVisibility(View.GONE), 5000);
+            } else {
+                status.setVisibility(View.GONE);
+                toast("Download failed: " + fe);
+            }
+        });
+            }
     // ---------- private files ----------
 
     void showFiles() {
@@ -640,10 +934,11 @@ public class MainActivity extends Activity {
                     }
                 })
                 .show();
-              }
-  void openFile(File f) {
+    }
+
+    void openFile(File f) {
         String n = f.getName().toLowerCase(Locale.US);
-        if (n.endsWith(".mp4") || n.endsWith(".webm") || n.endsWith(".mkv") || n.endsWith(".3gp")) {
+        if (n.endsWith(".mp4") || n.endsWith(".webm") || n.endsWith(".mkv") || n.endsWith(".3gp") || n.endsWith(".ts")) {
             final Dialog dlg = new Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen);
             FrameLayout fl = new FrameLayout(this);
             fl.setBackgroundColor(Color.BLACK);
@@ -705,6 +1000,4 @@ public class MainActivity extends Activity {
             ui.post(() -> toast(fr));
         }).start();
     }
-          }
-
- 
+                    }
